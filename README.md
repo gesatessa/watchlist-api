@@ -141,6 +141,7 @@ curl -X POST http://localhost:8000/api/users/login/ \
   }'
 
 # or simply:
+URUL_=localhost:800
 ADMIN_TOKEN=$(curl -s -X POST ${URL_}/api/users/login/ \
   -H "Content-Type: application/json" \
   -d '{
@@ -239,3 +240,60 @@ chmod +x entrypoint.sh
 ### nginx
 
 💡 The official Nginx image automatically runs `envsubst` on `/etc/nginx/templates/*.template`
+
+## Run Locally
+You need to add these environmental values:
+```sh
+#.env
+DJANGO_SECRET_KEY=#DjangoSecretKey
+DJANGO_ALLOWED_HOSTS=localhost,<INSTANCE_PUBLIC_IP>
+```
+
+```sh
+docker compose up --build
+```
+
+Some commands to debug:
+```sh
+# get a shell:
+docker exec -it watchlist-api-api-1 sh
+
+# inside the container:
+# curl -H "Host: 127.0.0.1" http://localhost:8000/healthz/
+
+curl -H "Host: localhost" http://localhost:8000/healthz/
+
+# create a superuser:
+python manage.py createsuperuser
+```
+
+@TODO localhost vs. 127.0.0.1
+
+
+## tag & push to ECR
+
+```sh
+
+docker build \
+  --build-arg DEV=false \
+  -t watchlist-api:latest .
+
+ECR_REPO=watchlist/api
+
+aws ecr create-repository \
+  --repository-name $ECR_REPO \
+  --image-scanning-configuration scanOnPush=true \
+  --region $AWS_REGION
+
+IMG_TAG=v2
+DOCKER_IMG_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:$IMG_TAG
+
+docker tag watchlist-api:latest $DOCKER_IMG_URI
+  
+docker push $DOCKER_IMG_URI
+
+# you may need to authenticate
+aws ecr get-login-password \
+  | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+```

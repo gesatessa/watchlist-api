@@ -37,6 +37,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+      start_period: 60s # prevents early false failures
     environment:
       # the keys match the settings in config/settings.py
       - DB_HOST=db
