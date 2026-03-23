@@ -17,8 +17,6 @@ jobs:
 
       # ----------------------------------------
       # 2. Configure AWS credentials
-      # Uses secrets for sensitive data
-      # Uses vars for non-sensitive config
       # ----------------------------------------
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
@@ -28,14 +26,13 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       # ----------------------------------------
-      # 3. Login to Amazon ECR (Docker registry)
+      # 3. Login to Amazon ECR
       # ----------------------------------------
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
       # ----------------------------------------
       # 4. Build & push Docker image
-      # Creates a unique image tag using commit SHA
       # ----------------------------------------
       - name: Build & push Docker image
         id: build-image
@@ -50,98 +47,40 @@ jobs:
           docker build -t $IMAGE_URI .
           docker push $IMAGE_URI
 
-          # Expose image URI to later steps
           echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
 
       # ----------------------------------------
-      # 5. Get current task definition ARN from ECS service
-      # This ensures we always use the Terraform-managed config
-      # ----------------------------------------
-      - name: Get current task definition
-        id: task-def-arn
-        run: |
-          TASK_DEF_ARN=$(aws ecs describe-services \
-            --cluster ${{ vars.ECS_CLUSTER }} \
-            --services ${{ vars.ECS_SERVICE }} \
-            --query "services[0].taskDefinition" \
-            --output text)
-
-          echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
-
-      # ----------------------------------------
-      # 6. Fetch full task definition JSON
+      # 5. Download current task definition
       # ----------------------------------------
       - name: Download task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition ${{ steps.task-def-arn.outputs.task_def_arn }} \
+            --task-definition $(aws ecs describe-services \
+              --cluster ${{ vars.ECS_CLUSTER }} \
+              --services ${{ vars.ECS_SERVICE }} \
+              --query "services[0].taskDefinition" \
+              --output text) \
             --query "taskDefinition" \
             > taskdef.json
 
       # ----------------------------------------
-      # 7. Clean task definition (remove AWS-managed fields)
-      # These fields cannot be reused when registering a new revision
+      # 6. Render new task definition (inject image)
       # ----------------------------------------
-      - name: Clean task definition
-        run: |
-          jq 'del(
-            .taskDefinitionArn,
-            .revision,
-            .status,
-            .requiresAttributes,
-            .compatibilities,
-            .registeredAt,
-            .registeredBy
-          )' taskdef.json > clean-taskdef.json
+      - name: Render task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: taskdef.json
+          container-name: ${{ vars.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
 
       # ----------------------------------------
-      # 8. Inject new Docker image into container definition
-      # IMPORTANT: container name must match Terraform definition
-      # ----------------------------------------
-      - name: Update image in task definition
-        env:
-          IMAGE_URI: ${{ steps.build-image.outputs.image }}
-          CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
-        run: |
-          jq --arg IMAGE "$IMAGE_URI" --arg NAME "$CONTAINER_NAME" \
-            '.containerDefinitions |= map(
-              if .name == $NAME
-              then .image = $IMAGE
-              else .
-              end
-            )' clean-taskdef.json > final-taskdef.json
-
-      # ----------------------------------------
-      # 9. Register new task definition revision
-      # ----------------------------------------
-      - name: Register new task definition
-        id: register-task
-        run: |
-          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://final-taskdef.json \
-            --query "taskDefinition.taskDefinitionArn" \
-            --output text)
-
-          echo "task_def_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
-
-      # ----------------------------------------
-      # 10. Update ECS service to use new revision
+      # 7. Deploy to ECS
       # ----------------------------------------
       - name: Deploy to ECS
-        run: |
-          aws ecs update-service \
-            --cluster ${{ vars.ECS_CLUSTER }} \
-            --service ${{ vars.ECS_SERVICE }} \
-            --task-definition ${{ steps.register-task.outputs.task_def_arn }}
-
-      # ----------------------------------------
-      # 11. Wait for deployment to complete (important!)
-      # Prevents silent failures
-      # ----------------------------------------
-      - name: Wait for service stability
-        run: |
-          aws ecs wait services-stable \
-            --cluster ${{ vars.ECS_CLUSTER }} \
-            --services ${{ vars.ECS_SERVICE }} \
-            --waiter-delay 30 \
-            --waiter-max-attempts 20
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ vars.ECS_SERVICE }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
