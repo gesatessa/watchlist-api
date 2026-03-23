@@ -142,4 +142,6 @@ jobs:
         run: |
           aws ecs wait services-stable \
             --cluster ${{ vars.ECS_CLUSTER }} \
-            --services ${{ vars.ECS_SERVICE }}
+            --services ${{ vars.ECS_SERVICE }} \
+            --waiter-delay 5 \
+            --waiter-max-attempts 12
